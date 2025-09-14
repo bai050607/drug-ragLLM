@@ -1,5 +1,5 @@
 import os
-import dashscope
+import openai
 from langgraph.graph import StateGraph, END, START, Send, State
 
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
@@ -9,22 +9,22 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
 
-    # 使用 DashScope API 生成查询
+    # 使用 OpenAI API 生成查询
     current_date = get_current_date()
     formatted_prompt = "...待填充"
     
-    # 设置 DashScope API Key
-    dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
+    # 设置 OpenAI API Key
+    openai.api_key = os.getenv("OPENAI_API_KEY")
     
-    # 调用千问 API
-    response = dashscope.Generation.call(
-        model="qwen-turbo",
-        prompt=formatted_prompt,
+    # 调用 OpenAI API
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": formatted_prompt}],
         temperature=1.0,
         max_tokens=1000
     )
     
-    result_text = response.output.text
+    result_text = response.choices[0].message.content
     # 解析结果并返回查询列表
     return {"search_query": parse_query_result(result_text)}
 
