@@ -2,15 +2,13 @@ from typing import TypedDict, List, Annotated
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from langchain_openai import ChatOpenAI
-from openai import OpenAI as OpenAIClient
+import os
 from neo4j import GraphDatabase
 import os
 
 # 导入DrugGraph类
 from raggraph import DrugGraph
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
+os.environ.setdefault("OPENAI_API_KEY", "dummy_key")
 
 class MedicalState(TypedDict):
     messages: Annotated[List[HumanMessage], add_messages]
@@ -51,12 +49,7 @@ def format_response(state: MedicalState):
     """
     return {"messages": [HumanMessage(content=response)]}
 
-qianwen_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-qianwen_api_key = os.getenv("DASHSCOPE_API_KEY")
-openai_client = OpenAIClient(
-    api_key=qianwen_api_key,
-    base_url=qianwen_api_base
-)
+# 不再直接使用 langchain_openai / openai 客户端；DrugGraph 内部已集成千问 LLM 与 Embedding
 drug_graph = DrugGraph(url="bolt://localhost:7687",username="neo4j",password="12345678")
 
 graph_builder = StateGraph(MedicalState)

@@ -33,7 +33,7 @@ class QianwenEmbedding(BaseEmbedding):
     def _get_query_embedding(self, query: str) -> List[float]:
         client = self._new_client()
         resp = client.embeddings.create(
-            model="text-embedding-v4",
+            model="text-embedding-v3",
             input=query,
             dimensions=self.embed_dim,
             encoding_format="float",
@@ -61,7 +61,7 @@ class QianwenLLM(LLM):
 
     api_key: str
     api_base: str
-    model: str = "qwen-turbo"
+    model: str = "qwen-plus"
     temperature: float = 0.0
 
     def _new_client(self) -> OpenAIClient:
