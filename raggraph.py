@@ -1,6 +1,7 @@
 from neo4j import GraphDatabase
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import os
+import json
 from llama_index.core import Document, VectorStoreIndex
 from qianwen_class import QianwenEmbedding, QianwenLLM
 
@@ -19,11 +20,13 @@ class DrugGraph:
         self.username = username
         self.password = password
         self._query_engine = None  # 延迟初始化 
+        self._candidate_names: Optional[Set[str]] = None
 
 
     def _get_query_engine(self):
         """获取或创建查询引擎（基于向量索引，延迟初始化）。"""
         if self._query_engine is None:
+            print("🔄 正在初始化向量检索引擎...")
             qianwen_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
             qianwen_api_key = os.getenv("DASHSCOPE_API_KEY")
             llm = QianwenLLM(
@@ -39,6 +42,7 @@ class DrugGraph:
             )
 
             # 从 Neo4j 拉取节点，构造文档
+            print("📊 正在从 Neo4j 拉取节点...")
             docs: List[Document] = []
             with self.driver.session() as session:
                 # 可根据需要调整 LIMIT 或拼接更多属性
@@ -51,12 +55,15 @@ class DrugGraph:
                     name = rec["name"]
                     text = f"名称：{name}；标签：{', '.join(labels)}"
                     docs.append(Document(text=text, metadata={"name": name, "labels": labels}))
+            
+            print(f"📚 已拉取 {len(docs)} 个节点，正在构建向量索引...")
 
             if not docs:
                 raise RuntimeError("未从 Neo4j 拉取到任何节点，无法构建向量索引")
 
             index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
             self._query_engine = index.as_query_engine(llm=llm)
+            print("✅ 向量检索引擎初始化完成")
         return self._query_engine
 
     def retrieve_medical_info(self, medical_text: str) -> str:
@@ -71,16 +78,101 @@ class DrugGraph:
             print(f"❌ 检索过程中出错: {e}")
             return f"检索过程中出现错误: {e}"
 
-    def query_medical_advice(self, medical_text: str) -> str:
+    def query_medical_advice(self, medical_text: str, retrieved_info: Optional[str] = None) -> str:
         """基于病历文本生成医疗建议"""
         try:
             query_engine = self._get_query_engine()
-            query = f"根据以下病历信息，推荐合适的药物和治疗方案：{medical_text}"
+            # 加载（缓存）候选药物集合
+            candidate_names = self._load_candidate_names()
+
+            # 极简提示词（减少 token）：仅约束输出与必要上下文
+            query = "仅输出候选药物内的中文通用名JSON数组。无则返回[]。\n"
+            query += f"病历：{medical_text}\n"
+            if retrieved_info:
+                query += f"检索：{retrieved_info}\n"
             response = query_engine.query(query)
-            return str(response)
+            text = str(response)
+
+            # 解析模型输出为列表
+            drugs: List[str] = []
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    drugs = [str(x).strip() for x in parsed if isinstance(x, (str, int, float))]
+            except Exception:
+                drugs = []
+
+            # 过滤至候选集合（若候选集合可用）
+            if candidate_names:
+                filtered: List[str] = []
+                seen: Set[str] = set()
+                for name in drugs:
+                    if name in candidate_names and name not in seen:
+                        filtered.append(name)
+                        seen.add(name)
+                return json.dumps(filtered, ensure_ascii=False)
+            else:
+                # 若没有候选集合可用，直接回传原始 JSON（或空数组）
+                return json.dumps(drugs, ensure_ascii=False)
         except Exception as e:
             print(f"❌ 查询过程中出错: {e}")
             return f"抱歉，查询过程中出现错误: {e}"
+
+    def _load_candidate_names(self, force_reload: bool = False) -> Set[str]:
+        """加载并缓存候选药物集合。"""
+        if self._candidate_names is not None and not force_reload:
+            return self._candidate_names
+        candidates_path = os.getenv(
+            "CANDIDATE_DRUGS_JSON",
+            os.path.join(os.path.dirname(__file__), "候选药物列表.json"),
+        )
+        names: Set[str] = set()
+        if os.path.isfile(candidates_path):
+            try:
+                with open(candidates_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        names = {str(x).strip() for x in data if str(x).strip()}
+            except Exception:
+                names = set()
+        self._candidate_names = names
+        return names
+
+
+    def prime_model_with_rules(self, include_full_list: bool = False, max_names: int = 200) -> None:
+        """在批量开始前，先发送一次提示词，告知规则与候选集合。
+
+        include_full_list: 是否在提示中包含完整候选清单（可能较长）。
+        max_names: 若不包含全量，则示例前 N 项，控制 token。
+        """
+        print("🔄 正在预热模型...")
+        query_engine = self._get_query_engine()
+        names = list(self._load_candidate_names())
+        names.sort()
+        if include_full_list:
+            listing = "、".join(names)
+        else:
+            listing = "、".join(names[:max_names])
+        prompt = (
+            "你是一个专业的医疗用药推荐系统。接下来的每个问题我都会给你一段病历描述和检索出的相关医疗信息，"
+            "你需要根据这些内容，从以下候选药物集合中仔细选择需要使用的药物。\n\n"
+            "重要要求：\n"
+            "1. 只能从候选药物集合中选择，不能推荐集合外的任何药物\n"
+            "2. 必须仔细分析病历中的症状、疾病、检查结果等信息\n"
+            "3. 必须结合检索出的相关医疗信息进行综合判断\n"
+            "4. 只返回药物名称的列表，格式为JSON数组，如：[\"药物1\", \"药物2\"]\n"
+            "5. 如果根据病历和检索信息无法确定需要任何药物，则返回空数组：[]\n"
+            "6. 不要输出任何解释、剂量、用法、适应症等额外信息\n"
+            "7. 不要输出任何非药物名称的内容\n"
+            "8. 药物名称必须与候选集合中的名称完全一致\n\n"
+            f"候选药物集合（共{len(names)}种药物）：{listing}\n\n"
+            "请严格按照以上要求执行，确保输出的准确性和一致性。"
+        )
+        try:
+            _ = query_engine.query(prompt)
+            print("✅ 模型预热完成")
+        except Exception as e:
+            print(f"⚠️ 模型预热失败: {e}")
 
     # def add_embedding_for_graph(self):
     #     """分层嵌入策略：为不同实体类型生成不同质量的嵌入向量（写回节点属性）。"""
