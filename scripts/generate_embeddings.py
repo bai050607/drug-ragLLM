@@ -3,6 +3,15 @@
 
 
 import os
+import sys
+
+# 从 src 目录导入 DrugGraph
+CURRENT_DIR = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 from raggraph import DrugGraph
 
 

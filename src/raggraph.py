@@ -124,7 +124,7 @@ class DrugGraph:
             return self._candidate_names
         candidates_path = os.getenv(
             "CANDIDATE_DRUGS_JSON",
-            os.path.join(os.path.dirname(__file__), "候选药物列表.json"),
+            os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "data", "候选药物列表.json"),
         )
         names: Set[str] = set()
         if os.path.isfile(candidates_path):

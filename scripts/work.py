@@ -7,7 +7,13 @@ import os
 from neo4j import GraphDatabase
 import os
 
-# 导入DrugGraph类
+# 导入DrugGraph类（调整为从 src 目录导入）
+import sys
+CURRENT_DIR = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 from raggraph import DrugGraph
 os.environ.setdefault("OPENAI_API_KEY", "dummy_key")
 
@@ -69,7 +75,7 @@ graph_builder.add_edge("generate_medical_advice", "format_response")
 graph_builder.add_edge("format_response", END)
 medical_graph = graph_builder.compile()
 if __name__ == "__main__":
-    input_path = "/root/drug-ragLLM/CDrugRed_test-A.jsonl"
+    input_path = "/root/drug-ragLLM/data/CDrugRed_test-A.jsonl"
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"未找到输入文件: {input_path}")
     
@@ -116,7 +122,7 @@ if __name__ == "__main__":
             print(f"# 处理 {case_id}: {len(drugs)} 个药物")
     
     # 输出为submit_pred_ex.json格式
-    output_path = "/root/drug-ragLLM/submit_pred.json"
+    output_path = "/root/drug-ragLLM/outputs/submit_pred.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     
