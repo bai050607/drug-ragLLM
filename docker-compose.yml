@@ -1,0 +1,44 @@
+
+#docker compose -f docker-compose.bgem3.yml up -d
+services:
+  carebot-llama3:
+    image: vllm/vllm-openai:v0.8.5.post1
+    container_name: carebot-llama3
+    # restart: always
+    ports:
+      - "7111:8000"  # 使用7101端口避免与embedding服务冲突
+    volumes:
+      - /Data/lx/models:/models
+    # command: ['--model', '/models/Qwen3-Reranker-0.6B',  '--served-model-name', 'qwen3-reranker-0.6b',  '--gpu-memory-utilization', '0.90', '--hf_overrides','{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}']
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model /models/BAAI/CareBot_Medical_multi-llama3-8b-instruct
+      --served-model-name carebot-llama3
+      --tensor-parallel-size 1
+      --trust-remote-code
+      --max-model-len 8192
+      --gpu-memory-utilization 0.90
+    #   --task score
+    environment:
+      - CUDA_VISIBLE_DEVICES=3  # 可以根据需要调整GPU设备
+    networks:
+      - llm-network
+  neo4j:
+    image: neo4j:latest
+    container_name: neo4j
+    ports:
+      - "7474:7474"   # HTTP UI
+      - "7687:7687"   # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/12345678
+    restart: unless-stopped
+networks:
+  llm-network:
+    driver: bridge 

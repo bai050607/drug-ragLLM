@@ -4,6 +4,10 @@ import os
 import json
 from llama_index.core import Document, VectorStoreIndex
 from qianwen_class import QianwenEmbedding, QianwenLLM
+from prompt import recommend_prompt as PROMPT
+from util import remove_think_blocks as chunk_text
+from llama_index.vector_stores.neo4jvector import Neo4jVectorStore
+from llama_index.core.storage.storage_context import StorageContext
 
 
 class DrugGraph:
@@ -24,56 +28,113 @@ class DrugGraph:
 
 
     def _get_query_engine(self):
-        """获取或创建查询引擎（基于向量索引，延迟初始化）。"""
+        """获取或创建查询引擎（基于Neo4j混合搜索，延迟初始化）。"""
         if self._query_engine is None:
-            print("🔄 正在初始化向量检索引擎...")
-            qianwen_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            qianwen_api_key = os.getenv("DASHSCOPE_API_KEY")
-            llm = QianwenLLM(
-                api_key=qianwen_api_key,
-                api_base=qianwen_api_base,
-                model="qwen-turbo",
-                temperature=0.0,
+            print("🔄 正在初始化Neo4j混合检索引擎...")
+            llm = QianwenLLM()
+            embed_model = QianwenEmbedding()
+            neo4j_vector = Neo4jVectorStore(
+                url=self.url, 
+                username=self.username, 
+                password=self.password, 
+                embedding_dimension=1024,
+                text_node_property="name",  # 使用 name 属性作为文本
+                embedding_node_property="embedding",  # 使用 embedding 属性
+                node_label="Node",  # 你的节点标签
+                hybrid_search=True  # 启用Neo4j内置混合搜索
             )
-            embed_model = QianwenEmbedding(
-                api_key=qianwen_api_key,
-                api_base=qianwen_api_base,
-                embed_dim=256,
-            )
-
-            # 从 Neo4j 拉取节点，构造文档
-            print("📊 正在从 Neo4j 拉取节点...")
-            docs: List[Document] = []
-            with self.driver.session() as session:
-                # 可根据需要调整 LIMIT 或拼接更多属性
-                cypher = (
-                    "MATCH (n) WHERE n.name IS NOT NULL "
-                    "RETURN labels(n) AS labels, n.name AS name LIMIT 1000"
+            storage_context = StorageContext.from_defaults(vector_store=neo4j_vector)
+            index = None
+            try:
+                print("💾 正在从 Neo4j 混合向量存储构建索引（免重建）...")
+                index = VectorStoreIndex.from_vector_store(
+                    vector_store=neo4j_vector,
+                    storage_context=storage_context,
+                    embed_model=embed_model,
                 )
-                for rec in session.run(cypher):
-                    labels = rec["labels"] or []
-                    name = rec["name"]
-                    text = f"名称：{name}；标签：{', '.join(labels)}"
-                    docs.append(Document(text=text, metadata={"name": name, "labels": labels}))
-            
-            print(f"📚 已拉取 {len(docs)} 个节点，正在构建向量索引...")
+                print("✅ 成功从 Neo4j 混合向量存储构建索引")
+            except Exception as e:
+                print(f"⚠️ 基于向量存储构建索引失败，将回退全量构建：{e}")
+            if index is None:
+                print("📊 从 Neo4j 分页拉取全部节点并构建索引...")
+                docs: List[Document] = []
+                batch_size = 5000
+                total = 0
+                with self.driver.session() as session:
+                    skip = 0
+                    while True:
+                        cypher = (
+                            "MATCH (n) WHERE n.name IS NOT NULL "
+                            "RETURN n SKIP $skip LIMIT $limit"
+                        )
+                        records = list(session.run(cypher, skip=skip, limit=batch_size))
+                        if not records:
+                            break
+                        for rec in records:
+                            node = rec["n"]
+                            labels = list(node.labels)
+                            properties = dict(node)
+                            text_parts = []
+                            text_parts.append(f"名称：{properties.get('name', '未知')}")
+                            if 'Disease' in labels:
+                                for key, value in properties.items():
+                                    if key != 'name' and value is not None:
+                                        if isinstance(value, str) and len(value.strip()) > 0:
+                                            value_str = str(value).strip()
+                                            if len(value_str) > 200:  # 限制单个属性值长度
+                                                value_str = value_str[:200] + "..."
+                                            text_parts.append(f"{key}：{value_str}")
+                                        elif not isinstance(value, str):
+                                            text_parts.append(f"{key}：{value}")
+                            else:
+                                if labels:
+                                    text_parts.append(f"类型：{', '.join(labels)}")
+                            text = "；".join(text_parts)
+                            metadata = {"name": properties.get('name'), "labels": labels}
+                            if 'Disease' in labels:
+                                metadata["entity_type"] = "Disease"
+                                if "cure_lasttime" in properties:
+                                    metadata["cure_lasttime"] = properties["cure_lasttime"]
+                                if "cured_prob" in properties:
+                                    metadata["cured_prob"] = properties["cured_prob"]
+                            docs.append(Document(text=text, metadata=metadata))
+                        total += len(records)
+                        skip += batch_size
+                        print(f"📥 已加载 {total} 条节点为文档...")
 
-            if not docs:
-                raise RuntimeError("未从 Neo4j 拉取到任何节点，无法构建向量索引")
+                if not docs:
+                    raise RuntimeError("未从 Neo4j 拉取到任何节点，无法构建向量索引")
 
-            index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
-            self._query_engine = index.as_query_engine(llm=llm)
-            print("✅ 向量检索引擎初始化完成")
+                print(f"📚 全量节点文档数：{len(docs)}，开始构建混合向量索引...")
+                index = VectorStoreIndex.from_documents(
+                    docs,
+                    storage_context=storage_context,
+                    embed_model=embed_model,
+                )
+            self._query_engine = index.as_query_engine(llm=llm, similarity_top_k=10)
+            print("✅ Neo4j混合检索引擎初始化完成")
         return self._query_engine
 
     def retrieve_medical_info(self, medical_text: str) -> str:
-        """基于病历文本检索相关医疗信息"""
+        """基于Neo4j混合搜索检索相关医疗信息"""
         try:
+            # 使用Neo4j内置混合搜索（向量+全文+图搜索）
+            import re
+            cleaned_text = re.sub(r'[^\u4e00-\u9fff\w\s.,;:!?()（）【】""''、，。；：！？]', '', str(medical_text))
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+            print("length:",len(cleaned_text))
+            # 使用Neo4j内置混合搜索（向量+全文+图搜索）
             query_engine = self._get_query_engine()
-            query = f"{medical_text}"
-            print(query)
-            response = query_engine.query(query)
-            return str(response)
+            retrieved_nodes = query_engine.retriever.retrieve(cleaned_text)
+            
+            # 直接返回所有检索到的节点
+            result = []
+            for node in retrieved_nodes:
+                result.append(f"{node.text}")
+            
+            print("检索结果:", result)
+            return "、".join(result) if result else "未找到相关信息"
+            
         except Exception as e:
             print(f"❌ 检索过程中出错: {e}")
             return f"检索过程中出现错误: {e}"
@@ -84,15 +145,15 @@ class DrugGraph:
             query_engine = self._get_query_engine()
             # 加载（缓存）候选药物集合
             candidate_names = self._load_candidate_names()
-
+            query = "请根据以下信息做出药物推荐，返回值仅为由药物组成的列表。\n"
             # 极简提示词（减少 token）：仅约束输出与必要上下文
-            query = "仅输出候选药物内的中文通用名JSON数组。无则返回[]。\n"
-            query += f"病历：{medical_text}\n"
+            query += "病例信息：{medical_text}\n"
             if retrieved_info:
-                query += f"检索：{retrieved_info}\n"
+                query += f"知识库检索可能节点：{retrieved_info}\n"
             response = query_engine.query(query)
             text = str(response)
-
+            text = chunk_text(text)
+            print(text)
             # 解析模型输出为列表
             drugs: List[str] = []
             try:
@@ -101,7 +162,6 @@ class DrugGraph:
                     drugs = [str(x).strip() for x in parsed if isinstance(x, (str, int, float))]
             except Exception:
                 drugs = []
-
             # 过滤至候选集合（若候选集合可用）
             if candidate_names:
                 filtered: List[str] = []
@@ -153,26 +213,20 @@ class DrugGraph:
             listing = "、".join(names)
         else:
             listing = "、".join(names[:max_names])
-        prompt = (
-            "你是一个专业的医疗用药推荐系统。接下来的每个问题我都会给你一段病历描述和检索出的相关医疗信息，"
-            "你需要根据这些内容，从以下候选药物集合中仔细选择需要使用的药物。\n\n"
-            "重要要求：\n"
-            "1. 只能从候选药物集合中选择，不能推荐集合外的任何药物\n"
-            "2. 必须仔细分析病历中的症状、疾病、检查结果等信息\n"
-            "3. 必须结合检索出的相关医疗信息进行综合判断\n"
-            "4. 只返回药物名称的列表，格式为JSON数组，如：[\"药物1\", \"药物2\"]\n"
-            "5. 如果根据病历和检索信息无法确定需要任何药物，则返回空数组：[]\n"
-            "6. 不要输出任何解释、剂量、用法、适应症等额外信息\n"
-            "7. 不要输出任何非药物名称的内容\n"
-            "8. 药物名称必须与候选集合中的名称完全一致\n\n"
-            f"候选药物集合（共{len(names)}种药物）：{listing}\n\n"
-            "请严格按照以上要求执行，确保输出的准确性和一致性。"
+        prompt=PROMPT.replace("{list}", listing)
+        # try:
+        llm = QianwenLLM(
+            api_key="dummy_key",
+            api_base="http://localhost:11434/v1",
+            model="qwq:latest"
         )
-        try:
-            _ = query_engine.query(prompt)
-            print("✅ 模型预热完成")
-        except Exception as e:
-            print(f"⚠️ 模型预热失败: {e}")
+        resp = llm.complete(prompt)
+        tt = str(resp)
+        tt = chunk_text(tt)
+        print(tt)
+        print("✅ 模型预热完成")
+        # except Exception as e:
+        #     print(f"⚠️ 模型预热失败: {e}")
 
     # def add_embedding_for_graph(self):
     #     """分层嵌入策略：为不同实体类型生成不同质量的嵌入向量（写回节点属性）。"""

@@ -1,88 +1,42 @@
+import sys
+import traceback
+# 确保能导入 src 包
+sys.path.insert(0, "/home/lx/drug-ragLLM")
 
-#测试用
+from src.qianwen_class import QianwenEmbedding, QianwenLLM
 
-
-import os
-from neo4j import GraphDatabase
-from raggraph import DrugGraph
-
-
-def diagnose_graph(url: str, username: str, password: str) -> None:
+def test_embedding():
+    e = QianwenEmbedding()
     try:
-        driver = GraphDatabase.driver(url, auth=(username, password))
-        with driver.session() as session:
-            # 1) 节点/关系计数
-            node_count = session.run("MATCH (n) RETURN count(n) AS c").single().get("c", 0)
-            rel_count = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single().get("c", 0)
-            print(f"[DIAG] 图规模: nodes={node_count}, rels={rel_count}")
+        emb = e._get_query_embedding("测试文本用于生成嵌入")
+        if isinstance(emb, list):
+            print("Embedding 向量长度：", len(emb))
+            print("Embedding 向量前10维：", emb[:10])
+        else:
+            print("Embedding 返回：", emb)
+    except Exception as ex:
+        print("Embedding 请求出错：", type(ex), ex)
+        traceback.print_exc()
 
-            # 2) Top 标签分布（不依赖 APOC）
-            label_stats = session.run(
-                """
-                MATCH (n)
-                UNWIND labels(n) AS l
-                RETURN l AS label, count(*) AS c
-                ORDER BY c DESC
-                LIMIT 10
-                """
-            ).data()
-            if label_stats:
-                print("[DIAG] Top 标签:")
-                for row in label_stats:
-                    print(f"  - {row['label']}: {row['c']}")
-            else:
-                print("[DIAG] 未检索到任何节点标签")
-
-            # 3) 抽样三元组
-            samples = session.run(
-                """
-                MATCH (a)-[r]->(b)
-                RETURN labels(a) AS a_labels, type(r) AS rel, labels(b) AS b_labels,
-                       coalesce(a.name, a.id, a.title, a.label) AS a_name,
-                       coalesce(b.name, b.id, b.title, b.label) AS b_name
-                LIMIT 10
-                """
-            ).data()
-            if samples:
-                print("[DIAG] 样例三元组 (最多10条):")
-                for s in samples:
-                    print(f"  - ({s['a_labels']}, {s['a_name']}) -[:{s['rel']}]-> ({s['b_labels']}, {s['b_name']})")
-            else:
-                print("[DIAG] 未抽样到任何关系三元组")
-    except Exception as e:
-        print(f"[DIAG] 图诊断失败: {e}")
-
+def test_llm():
+    llm = QianwenLLM()
+    try:
+        resp = llm.chat([{"role":"user", "content":"请用一句话介绍一下你自己。"}])
+        # 尝试打印主要内容
+        try:
+            content = resp.message.content
+        except Exception:
+            content = str(resp)
+        print("LLM 返回：", content)
+    except Exception as ex:
+        print("LLM 请求出错：", type(ex), ex)
+        traceback.print_exc()
 
 def main():
-    # 自拟病历文本
-    medical_text = ("低增生性急性白血病")
-    print(medical_text)
-
-    url = "bolt://localhost:7687"
-    username = "neo4j"
-    password = "12345678"
-
-    # 图诊断
-    diagnose_graph(url, username, password)
-
-    # 调用图检索
-    try:
-        drug_graph = DrugGraph(
-            url=url,
-            username=username,
-            password=password,
-        )
-    except Exception as e:
-        print(f"[TEST] 创建 DrugGraph 实例失败: {e}")
-        return
-
-    try:
-        print("[TEST] 开始基于病历文本检索图谱信息 ...")
-        result = drug_graph.retrieve_medical_info(medical_text)
-        print("[TEST] 检索结果:\n---\n" + str(result) + "\n---")
-    except Exception as e:
-        print(f"[TEST] 检索失败: {e}")
-
+    print("使用 qianwen_class 测试嵌入与 LLM")
+    test_embedding()
+    print()
+    test_llm()
 
 if __name__ == "__main__":
     main()

@@ -75,7 +75,7 @@ graph_builder.add_edge("generate_medical_advice", "format_response")
 graph_builder.add_edge("format_response", END)
 medical_graph = graph_builder.compile()
 if __name__ == "__main__":
-    input_path = "/root/drug-ragLLM/data/CDrugRed_test-A.jsonl"
+    input_path = "/home/lx/drug-ragLLM/data/CDrugRed_test-A.jsonl"
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"未找到输入文件: {input_path}")
     
@@ -122,7 +122,7 @@ if __name__ == "__main__":
             print(f"# 处理 {case_id}: {len(drugs)} 个药物")
     
     # 输出为submit_pred_ex.json格式
-    output_path = "/root/drug-ragLLM/outputs/submit_pred.json"
+    output_path = "/home/lx/drug-ragLLM/outputs/submit_pred.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     
