@@ -6,7 +6,6 @@ from typing import TypedDict, List, Annotated
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from raggraph import DrugGraph
 # 项目内部导入
 CURRENT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
@@ -21,7 +20,7 @@ class MedicalState(TypedDict):
     medical_text: str
     retrieved_info: str
     medical_advice: str
-
+from raggraph import DrugGraph
 
 def extract_medical_text(state: MedicalState):
     print("[WORK] node: extract_medical_text")
