@@ -3,6 +3,8 @@ from typing import List, Dict, Any
 from llama_index.core import Document, VectorStoreIndex, StorageContext
 from llama_index.vector_stores.neo4jvector import Neo4jVectorStore
 from qianwen_class import QianwenEmbedding, QianwenLLM
+from langchain_ollama.embeddings import OllamaEmbeddings
+from wap.vector_retriver import VectorDatabaseFactory
 
 
 class Neo4jManager:
@@ -71,22 +73,32 @@ class Neo4jManager:
         return self._query_engine
         
     def retrieve_medical_info(self, medical_text: str) -> str:
-        """基于Neo4j混合搜索检索相关医疗信息"""
+        """基于外部向量库（Chroma + LlamaIndex）检索相关医疗信息（直接使用 medical_text 作为查询）。"""
         try:
-            # 使用Neo4j内置混合搜索（向量+全文+图搜索）
-            import re
-            cleaned_text = re.sub(r'[^\u4e00-\u9fff\w\s.,;:!?()（）【】""''、，。；：！？]', '', str(medical_text))
-            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-            print("length:",len(cleaned_text))
-            # 使用向量搜索检索相关文档
-            query_engine = self._get_query_engine()
-            retrieved_nodes = query_engine.as_retriever(similarity_top_k=10).retrieve(cleaned_text)
-            # 直接返回所有检索到的节点
-            result = []
-            for node in retrieved_nodes:
-                result.append(f"{node.text}")
-            print("检索结果:", result)
-            return "、".join(result) if result else "未找到相关信息"
+            # 1) 直接将 medical_text 作为查询语句
+            query_text = str(medical_text).strip()
+            if not query_text:
+                return ""
+            # 2) 初始化外部向量数据库（需与入库时配置一致）
+            VECTOR_DB_PATH = "./chroma_store"
+            COLLECTION_NAME = "drug_info"
+            EMBEDDING_MODEL = "bge-m3"
+            OLLAMA_BASE_URL = "http://localhost:11434"
+            embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+            vector_db = VectorDatabaseFactory.create(
+                embeddings=embeddings,
+                vector_db_path=VECTOR_DB_PATH,
+                collection_name=COLLECTION_NAME,
+            )
+            stats = vector_db.get_stats()
+            if stats.get("status") != "initialized" or stats.get("documents_count", 0) == 0:
+                return "向量库为空或未初始化"
+            # 3) 执行检索
+            nodes = vector_db.search(query_text, top_k=10)
+            if not nodes:
+                return "未找到相关信息"
+            results = [n.node.get_content() for n in nodes if getattr(n, 'node', None)]
+            return "\n".join(results)
         except Exception as e:
             print(f"❌ 检索过程中出错: {e}")
             return f"检索过程中出现错误: {e}"

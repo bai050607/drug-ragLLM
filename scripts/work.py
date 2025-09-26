@@ -17,6 +17,10 @@ os.environ.setdefault("OPENAI_API_KEY", "dummy_key")
 class MedicalState(TypedDict):
     """医疗状态类型定义"""
     messages: Annotated[List[HumanMessage], add_messages]
+    # 新增：查询文本与原始JSON文本
+    query_text: str
+    medical_text_json: str
+    # 兼容下游：提取后的medical_text（用于生成建议）
     medical_text: str
     retrieved_info: str
     medical_advice: str
@@ -24,21 +28,23 @@ from raggraph import DrugGraph
 
 def extract_medical_text(state: MedicalState):
     print("[WORK] node: extract_medical_text")
-    last_message = state["messages"][-1].content
-    return {"medical_text": last_message}
+    # 将原始JSON文本作为 medical_text 供后续 LLM 生成建议使用
+    json_text = state.get("medical_text_json", "")
+    return {"medical_text": json_text}
 
 def retrieve_medical_info(state: MedicalState):
     print("[WORK] node: retrieve_medical_info")
     if drug_graph is None:
         return {"retrieved_info": "DrugGraph未正确初始化"}
-    medical_text = state["medical_text"]
-    return {"retrieved_info": drug_graph.neo4j_manager.retrieve_medical_info(medical_text)}
+    # 使用 query_text 进行向量检索
+    query_text = state.get("query_text", "")
+    return {"retrieved_info": drug_graph.neo4j_manager.retrieve_medical_info(query_text)}
 
 def generate_medical_advice(state: MedicalState):
     print("[WORK] node: generate_medical_advice")
     if drug_graph is None:
         return {"medical_advice": "DrugGraph未正确初始化"}
-    medical_text = state["medical_text"]
+    medical_text = state.get("medical_text", "")
     retrieved_info = state.get("retrieved_info")
     return {"medical_advice": drug_graph.query_medical_advice(medical_text, retrieved_info)}
 
@@ -54,7 +60,6 @@ def format_response(state: MedicalState):
     {medical_advice}
     """
     return {"messages": [HumanMessage(content=response)]}
-
 
 def create_medical_graph() -> StateGraph:
     """创建医疗处理图"""
@@ -75,42 +80,33 @@ def create_medical_graph() -> StateGraph:
     
     return graph_builder.compile()
 
-
 # 全局变量初始化
 drug_graph = DrugGraph(url="bolt://localhost:7687", username="neo4j", password="12345678")
-drug_graph.prime_model_with_rules(include_full_list=False, max_names=200)
 medical_graph = create_medical_graph()
 if __name__ == "__main__":
-    input_path = "/home/lx/drug-ragLLM/data/CDrugRed_test-A.jsonl"
-    if not os.path.isfile(input_path):
-        raise FileNotFoundError(f"未找到输入文件: {input_path}")
+    # 从 process_drug.py 生成的 queries 文件读取
+    queries_path = "/home/lx/drug-ragLLM/outputs/queries.txt"
+    jsonl_path = "/home/lx/drug-ragLLM/data/CDrugRed_test-A.jsonl"
+    if not os.path.isfile(queries_path):
+        raise FileNotFoundError(f"未找到输入文件: {queries_path}")
+    if not os.path.isfile(jsonl_path):
+        raise FileNotFoundError(f"未找到输入文件: {jsonl_path}")
     
     results = []
-    with open(input_path, "r", encoding="utf-8") as f:
-        for idx, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
+    with open(queries_path, "r", encoding="utf-8") as fq, open(jsonl_path, "r", encoding="utf-8") as fj:
+        for idx, (q_line, j_line) in enumerate(zip(fq, fj), start=1):
+            q_line = q_line.strip()
+            j_line = j_line.strip()
+            if not q_line or not j_line:
                 continue
-            
-            # 解析JSON行获取ID和病历文本
-            try:
-                obj = json.loads(line)
-                case_id = obj.get("就诊标识", f"unknown-{idx}")
-                
-                # 优先使用常见字段，其次回退为整行文本
-                message_text = line
-                for key in ("medical_text", "text", "query", "input", "诊疗过程描述"):
-                    if key in obj and isinstance(obj[key], str) and obj[key].strip():
-                        message_text = obj[key].strip()
-                        break
-            except Exception:
-                case_id = f"unknown-{idx}"
-                message_text = line
-            
-            initial_state = {"messages": [HumanMessage(content=message_text)]}
+            case_id = f"line-{idx}"
+            # 初始state：同时设置 query_text 与 medical_text_json
+            initial_state = {
+                "messages": [HumanMessage(content=j_line)],
+                "query_text": q_line,
+                "medical_text_json": j_line,
+            }
             result = medical_graph.invoke(initial_state)
-            
-            # 解析医疗建议为药物列表
             medical_advice = result.get("medical_advice", "[]")
             try:
                 drugs = json.loads(medical_advice)
@@ -119,15 +115,11 @@ if __name__ == "__main__":
             except Exception:
                 drugs = []
             
-            # 添加到结果列表
             results.append({
                 "ID": case_id,
                 "prediction": drugs
             })
-            
             print(f"# 处理 {case_id}: {len(drugs)} 个药物")
-    
-    # 输出为submit_pred_ex.json格式
     output_path = "/home/lx/drug-ragLLM/outputs/submit_pred.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
