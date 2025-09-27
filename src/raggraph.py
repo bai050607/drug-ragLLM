@@ -21,23 +21,44 @@ class DrugGraph:
         self.llm = QianwenLLM()
         self.candidate_names = self._load_candidate_names()
 
+    def ask_query_prompt(self, content: str) -> str:
+        """使用单一字符串 content 填充 query_prompt 中的全部占位符并询问 LLM，返回清洗后的回答。"""
+        from prompt import query_prompt  # 按需导入
+        tpl = str(query_prompt)
+        val = "" if content is None else str(content)
+        keys = [
+            "gender", "bmi", "treatment_process", "admission_status",
+            "current_illness", "past_history", "chief_complaint", "discharge_diagnosis",
+        ]
+        for k in keys:
+            tpl = tpl.replace(f"{{{k}}}", val)
+            tpl = tpl.replace(f"{{{{{k}}}}}", val)
+        resp = self.llm.complete(tpl)
+        return chunk_text(str(resp))
+
     def query_medical_advice(self, medical_text: str, retrieved_info: Optional[str] = None) -> str:
-        """基于病历文本生成医疗建议"""
+        """基于病历文本生成医疗建议：将 PROMPT 内嵌并用 text1/text2 填充。"""
         try:
-            query = "请根据以下信息做出药物推荐，返回值仅为由药物组成的列表。\n"
-            # 极简提示词（减少 token）：仅约束输出与必要上下文
-            query += "病例信息：{medical_text}\n"
-            if retrieved_info:
-                query += f"知识库检索内容：{retrieved_info}\n"
-            response = self.llm.complete(query)
-            text = str(response)
-            text = chunk_text(text)
-            text = self.filter_to_candidates(text)
+            prompt_text = str(PROMPT)
+            t1 = "" if medical_text is None else str(medical_text)
+            t2 = "" if retrieved_info is None else str(retrieved_info)
+            # 支持 {text1}/{text2} 与 {{text1}}/{{text2}}
+            for k, v in (("text1", t1), ("text2", t2)):
+                prompt_text = prompt_text.replace(f"{{{k}}}", v)
+                prompt_text = prompt_text.replace(f"{{{{{k}}}}}", v)
+            response = self.llm.complete(prompt_text)
+            text = chunk_text(str(response))
             # 解析模型输出为列表
             drugs: List[str] = []
             try:
                 parsed = json.loads(text)
-                if isinstance(parsed, list):
+                if isinstance(parsed, dict) and "药物推荐" in parsed:
+                    # 处理 {"药物推荐": ["药物1", "药物2"]} 格式
+                    drug_list = parsed["药物推荐"]
+                    if isinstance(drug_list, list):
+                        drugs = [str(x).strip() for x in drug_list if isinstance(x, (str, int, float))]
+                elif isinstance(parsed, list):
+                    # 处理 ["药物1", "药物2"] 格式
                     drugs = [str(x).strip() for x in parsed if isinstance(x, (str, int, float))]
             except Exception:
                 drugs = []
@@ -51,7 +72,6 @@ class DrugGraph:
                         seen.add(name)
                 return json.dumps(filtered, ensure_ascii=False)
             else:
-                # 若没有候选集合可用，直接回传原始 JSON（或空数组）
                 return json.dumps(drugs, ensure_ascii=False)
         except Exception as e:
             print(f"❌ 查询过程中出错: {e}")
@@ -93,13 +113,6 @@ class DrugGraph:
                 seen.add(name)
         return json.dumps(filtered, ensure_ascii=False)
 
-    def prime_model_with_rules(self, include_full_list: bool = False, max_names: int = 200) -> None:
-        """在批量开始前，先发送一次提示词，告知规则与候选集合。"""
-        print("🔄 正在预热模型...")
-        # 直接使用 PROMPT，不再做占位符替换
-        resp = self.llm.complete(PROMPT)
-        tt = str(resp)
-        tt = chunk_text(tt)
-        print(tt)
-        print("✅ 模型预热完成")
-        
+    def retrieve_medical_info(self, query_text: str) -> str:
+        """调用 Neo4j 管理器的检索函数获取相关医疗信息。"""
+        return self.neo4j_manager.retrieve_medical_info(query_text)
